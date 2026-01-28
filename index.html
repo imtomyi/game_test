@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KartRider - Speed Mode</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background: #1a1a2e;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+        }
+        #gameContainer {
+            position: relative;
+        }
+        #gameCanvas {
+            border: 4px solid #4a4a6a;
+            border-radius: 8px;
+            box-shadow: 0 0 30px rgba(100, 100, 255, 0.3);
+        }
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-size: 16px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+        }
+        #ui div {
+            margin-bottom: 8px;
+            background: rgba(0,0,0,0.5);
+            padding: 8px 12px;
+            border-radius: 4px;
+        }
+        #boostBar {
+            width: 150px;
+            height: 20px;
+            background: #333;
+            border-radius: 10px;
+            overflow: hidden;
+            border: 2px solid #555;
+        }
+        #boostFill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #ff6b00, #ffaa00);
+            transition: width 0.1s;
+        }
+        #boostFill.charging {
+            background: linear-gradient(90deg, #00aaff, #00ffff);
+        }
+        #boostFill.boosting {
+            background: linear-gradient(90deg, #ff0066, #ff00ff);
+        }
+        #controls {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: #aaa;
+            font-size: 12px;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            border-radius: 4px;
+        }
+        #message {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 48px;
+            font-weight: bold;
+            text-shadow: 3px 3px 6px rgba(0,0,0,0.8);
+            display: none;
+        }
+        #lapTime {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            color: white;
+            font-size: 14px;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            border-radius: 4px;
+            text-align: right;
+        }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <canvas id="gameCanvas" width="1000" height="700"></canvas>
+        <div id="ui">
+            <div>Lap: <span id="lapCount">0</span> / 3</div>
+            <div>Speed: <span id="speed">0</span> km/h</div>
+            <div>
+                Boost:
+                <div id="boostBar">
+                    <div id="boostFill"></div>
+                </div>
+            </div>
+        </div>
+        <div id="lapTime">
+            <div>Current: <span id="currentTime">00:00.000</span></div>
+            <div>Best Lap: <span id="bestLap">--:--.---</span></div>
+        </div>
+        <div id="controls">
+            <strong>Controls:</strong><br>
+            Arrow Keys / WASD - Drive<br>
+            SHIFT (hold while turning) - Drift<br>
+            Release SHIFT after drift - Boost!
+        </div>
+        <div id="message"></div>
+    </div>
+
+    <script>
+        // Game Constants
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // UI Elements
+        const lapCountEl = document.getElementById('lapCount');
+        const speedEl = document.getElementById('speed');
+        const boostFillEl = document.getElementById('boostFill');
+        const messageEl = document.getElementById('message');
+        const currentTimeEl = document.getElementById('currentTime');
+        const bestLapEl = document.getElementById('bestLap');
+
+        // Game State
+        const keys = {};
+        let gameState = 'countdown'; // countdown, racing, finished
+        let countdownTimer = 3;
+        let lastTime = 0;
+
+        // Car Properties
+        const car = {
+            x: 500,
+            y: 580,
+            angle: -Math.PI / 2, // Facing up
+            speed: 0,
+            angularVelocity: 0,
+            width: 30,
+            height: 50,
+
+            // Physics
+            maxSpeed: 8,
+            acceleration: 0.15,
+            brakeForce: 0.2,
+            friction: 0.02,
+            turnSpeed: 0.05,
+
+            // Drift
+            isDrifting: false,
+            driftAngle: 0,
+            driftCharge: 0,
+            maxDriftCharge: 100,
+            driftChargeRate: 1.5,
+
+            // Boost
+            boostAmount: 0,
+            maxBoost: 100,
+            isBoosting: false,
+            boostTimer: 0,
+            boostMultiplier: 1.6
+        };
+
+        // Race State
+        const race = {
+            lap: 0,
+            maxLaps: 3,
+            checkpoints: [false, false, false, false],
+            lapStartTime: 0,
+            currentLapTime: 0,
+            bestLapTime: Infinity,
+            raceStartTime: 0,
+            finished: false
+        };
+
+        // Track Definition - Oval track with curves
+        const track = {
+            // Outer boundary
+            outer: [
+                {x: 100, y: 100},
+                {x: 900, y: 100},
+                {x: 950, y: 150},
+                {x: 950, y: 550},
+                {x: 900, y: 600},
+                {x: 100, y: 600},
+                {x: 50, y: 550},
+                {x: 50, y: 150}
+            ],
+            // Inner boundary
+            inner: [
+                {x: 200, y: 200},
+                {x: 800, y: 200},
+                {x: 850, y: 250},
+                {x: 850, y: 450},
+                {x: 800, y: 500},
+                {x: 200, y: 500},
+                {x: 150, y: 450},
+                {x: 150, y: 250}
+            ],
+            // Checkpoints (invisible lines to cross)
+            checkpoints: [
+                {x1: 500, y1: 500, x2: 500, y2: 600}, // Bottom
+                {x1: 850, y1: 350, x2: 950, y2: 350}, // Right
+                {x1: 500, y1: 100, x2: 500, y2: 200}, // Top
+                {x1: 50, y1: 350, x2: 150, y2: 350}   // Left
+            ],
+            // Finish line
+            finishLine: {x1: 450, y1: 500, x2: 450, y2: 600}
+        };
+
+        // Input handling
+        document.addEventListener('keydown', (e) => {
+            keys[e.key.toLowerCase()] = true;
+            keys[e.code] = true;
+        });
+
+        document.addEventListener('keyup', (e) => {
+            keys[e.key.toLowerCase()] = false;
+            keys[e.code] = false;
+
+            // Release drift - apply boost
+            if (e.key === 'Shift' && car.isDrifting) {
+                releaseDrift();
+            }
+        });
+
+        function releaseDrift() {
+            car.isDrifting = false;
+
+            // Convert drift charge to boost
+            if (car.driftCharge > 20) {
+                car.boostAmount = Math.min(car.maxBoost, car.boostAmount + car.driftCharge);
+                car.isBoosting = true;
+                car.boostTimer = car.driftCharge * 2; // Boost duration based on charge
+            }
+
+            car.driftCharge = 0;
+            car.driftAngle = 0;
+        }
+
+        function updateCar(dt) {
+            if (gameState !== 'racing') return;
+
+            const forward = keys['arrowup'] || keys['w'];
+            const backward = keys['arrowdown'] || keys['s'];
+            const left = keys['arrowleft'] || keys['a'];
+            const right = keys['arrowright'] || keys['d'];
+            const drift = keys['Shift'] || keys['shift'];
+
+            // Calculate effective max speed
+            let effectiveMaxSpeed = car.maxSpeed;
+            if (car.isBoosting) {
+                effectiveMaxSpeed *= car.boostMultiplier;
+            }
+
+            // Acceleration
+            if (forward) {
+                car.speed += car.acceleration;
+            } else if (backward) {
+                car.speed -= car.brakeForce;
+            }
+
+            // Apply friction
+            car.speed *= (1 - car.friction);
+
+            // Clamp speed
+            car.speed = Math.max(-car.maxSpeed * 0.3, Math.min(effectiveMaxSpeed, car.speed));
+
+            // Steering
+            let turnAmount = 0;
+            if (Math.abs(car.speed) > 0.1) {
+                const turnDirection = car.speed > 0 ? 1 : -1;
+                const speedFactor = Math.min(1, Math.abs(car.speed) / car.maxSpeed);
+
+                if (left) turnAmount = -car.turnSpeed * turnDirection * speedFactor;
+                if (right) turnAmount = car.turnSpeed * turnDirection * speedFactor;
+            }
+
+            // Drift mechanics
+            if (drift && (left || right) && car.speed > 2) {
+                if (!car.isDrifting) {
+                    car.isDrifting = true;
+                    car.driftAngle = left ? -0.3 : 0.3;
+                }
+
+                // Charge boost while drifting
+                car.driftCharge = Math.min(car.maxDriftCharge, car.driftCharge + car.driftChargeRate);
+
+                // Enhanced turning while drifting
+                turnAmount *= 1.5;
+
+                // Drift slide effect
+                car.driftAngle = left ? -0.3 : 0.3;
+            } else if (!drift && car.isDrifting) {
+                releaseDrift();
+            }
+
+            // Apply rotation
+            car.angle += turnAmount;
+
+            // Boost consumption
+            if (car.isBoosting) {
+                car.boostTimer -= 1;
+                car.boostAmount = Math.max(0, car.boostAmount - 0.5);
+
+                if (car.boostTimer <= 0 || car.boostAmount <= 0) {
+                    car.isBoosting = false;
+                    car.boostTimer = 0;
+                }
+            }
+
+            // Calculate movement direction (with drift offset)
+            let moveAngle = car.angle;
+            if (car.isDrifting) {
+                moveAngle += car.driftAngle * 0.5;
+            }
+
+            // Calculate new position
+            const newX = car.x + Math.cos(moveAngle) * car.speed;
+            const newY = car.y + Math.sin(moveAngle) * car.speed;
+
+            // Check track boundaries
+            if (isOnTrack(newX, newY)) {
+                car.x = newX;
+                car.y = newY;
+            } else {
+                // Hit wall - reduce speed significantly
+                car.speed *= 0.3;
+                car.isBoosting = false;
+                car.boostTimer = 0;
+            }
+
+            // Update race state
+            updateRace();
+        }
+
+        function isOnTrack(x, y) {
+            // Check if point is inside outer boundary and outside inner boundary
+            const inOuter = isPointInPolygon(x, y, track.outer);
+            const inInner = isPointInPolygon(x, y, track.inner);
+            return inOuter && !inInner;
+        }
+
+        function isPointInPolygon(x, y, polygon) {
+            let inside = false;
+            for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+                const xi = polygon[i].x, yi = polygon[i].y;
+                const xj = polygon[j].x, yj = polygon[j].y;
+
+                if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+                    inside = !inside;
+                }
+            }
+            return inside;
+        }
+
+        function lineIntersectsLine(x1, y1, x2, y2, x3, y3, x4, y4) {
+            const denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+            if (Math.abs(denom) < 0.0001) return false;
+
+            const t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom;
+            const u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom;
+
+            return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+        }
+
+        function carCrossedLine(line) {
+            // Check if car crossed the line this frame
+            const prevX = car.x - Math.cos(car.angle) * car.speed * 2;
+            const prevY = car.y - Math.sin(car.angle) * car.speed * 2;
+
+            return lineIntersectsLine(prevX, prevY, car.x, car.y,
+                                      line.x1, line.y1, line.x2, line.y2);
+        }
+
+        function updateRace() {
+            // Update lap time
+            if (race.lap > 0) {
+                race.currentLapTime = Date.now() - race.lapStartTime;
+            }
+
+            // Check checkpoints
+            for (let i = 0; i < track.checkpoints.length; i++) {
+                if (!race.checkpoints[i] && carCrossedLine(track.checkpoints[i])) {
+                    race.checkpoints[i] = true;
+                }
+            }
+
+            // Check finish line
+            if (carCrossedLine(track.finishLine)) {
+                // Only count if all checkpoints were hit
+                const allCheckpoints = race.checkpoints.every(cp => cp);
+
+                if (allCheckpoints || race.lap === 0) {
+                    // Complete lap
+                    if (race.lap > 0 && race.currentLapTime < race.bestLapTime) {
+                        race.bestLapTime = race.currentLapTime;
+                    }
+
+                    race.lap++;
+                    race.lapStartTime = Date.now();
+                    race.checkpoints = [false, false, false, false];
+
+                    if (race.lap > race.maxLaps) {
+                        gameState = 'finished';
+                        race.finished = true;
+                        showMessage('FINISH!');
+                    } else if (race.lap > 1) {
+                        showMessage('Lap ' + (race.lap - 1) + ' Complete!', 1500);
+                    }
+                }
+            }
+        }
+
+        function showMessage(text, duration = 2000) {
+            messageEl.textContent = text;
+            messageEl.style.display = 'block';
+
+            if (duration > 0) {
+                setTimeout(() => {
+                    messageEl.style.display = 'none';
+                }, duration);
+            }
+        }
+
+        function formatTime(ms) {
+            const minutes = Math.floor(ms / 60000);
+            const seconds = Math.floor((ms % 60000) / 1000);
+            const millis = ms % 1000;
+            return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}.${millis.toString().padStart(3, '0')}`;
+        }
+
+        function drawTrack() {
+            // Draw grass background
+            ctx.fillStyle = '#2d5a27';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw outer track area
+            ctx.fillStyle = '#555555';
+            ctx.beginPath();
+            ctx.moveTo(track.outer[0].x, track.outer[0].y);
+            for (let i = 1; i < track.outer.length; i++) {
+                ctx.lineTo(track.outer[i].x, track.outer[i].y);
+            }
+            ctx.closePath();
+            ctx.fill();
+
+            // Cut out inner area (grass)
+            ctx.fillStyle = '#2d5a27';
+            ctx.beginPath();
+            ctx.moveTo(track.inner[0].x, track.inner[0].y);
+            for (let i = 1; i < track.inner.length; i++) {
+                ctx.lineTo(track.inner[i].x, track.inner[i].y);
+            }
+            ctx.closePath();
+            ctx.fill();
+
+            // Draw track boundaries
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 4;
+
+            // Outer boundary
+            ctx.beginPath();
+            ctx.moveTo(track.outer[0].x, track.outer[0].y);
+            for (let i = 1; i < track.outer.length; i++) {
+                ctx.lineTo(track.outer[i].x, track.outer[i].y);
+            }
+            ctx.closePath();
+            ctx.stroke();
+
+            // Inner boundary
+            ctx.beginPath();
+            ctx.moveTo(track.inner[0].x, track.inner[0].y);
+            for (let i = 1; i < track.inner.length; i++) {
+                ctx.lineTo(track.inner[i].x, track.inner[i].y);
+            }
+            ctx.closePath();
+            ctx.stroke();
+
+            // Draw racing line markers (dashed)
+            ctx.strokeStyle = '#ffff00';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([20, 20]);
+
+            // Center line approximate
+            const centerLine = [
+                {x: 150, y: 550},
+                {x: 825, y: 550},
+                {x: 900, y: 475},
+                {x: 900, y: 225},
+                {x: 825, y: 150},
+                {x: 175, y: 150},
+                {x: 100, y: 225},
+                {x: 100, y: 475}
+            ];
+
+            ctx.beginPath();
+            ctx.moveTo(centerLine[0].x, centerLine[0].y);
+            for (let i = 1; i < centerLine.length; i++) {
+                ctx.lineTo(centerLine[i].x, centerLine[i].y);
+            }
+            ctx.closePath();
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Draw finish line
+            ctx.fillStyle = '#ffffff';
+            for (let i = 0; i < 5; i++) {
+                for (let j = 0; j < 2; j++) {
+                    if ((i + j) % 2 === 0) {
+                        ctx.fillRect(440 + j * 10, 500 + i * 20, 10, 20);
+                    }
+                }
+            }
+
+            // Draw start/finish text
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 14px Arial';
+            ctx.fillText('START/FINISH', 420, 495);
+
+            // Draw checkpoint indicators (subtle)
+            ctx.fillStyle = 'rgba(0, 255, 0, 0.3)';
+            for (let i = 0; i < track.checkpoints.length; i++) {
+                const cp = track.checkpoints[i];
+                if (race.checkpoints[i]) {
+                    ctx.fillStyle = 'rgba(0, 255, 0, 0.5)';
+                } else {
+                    ctx.fillStyle = 'rgba(255, 255, 0, 0.3)';
+                }
+                ctx.beginPath();
+                ctx.moveTo(cp.x1, cp.y1);
+                ctx.lineTo(cp.x2, cp.y2);
+                ctx.lineWidth = 5;
+                ctx.strokeStyle = race.checkpoints[i] ? 'rgba(0,255,0,0.5)' : 'rgba(255,255,0,0.3)';
+                ctx.stroke();
+            }
+        }
+
+        function drawCar() {
+            ctx.save();
+            ctx.translate(car.x, car.y);
+            ctx.rotate(car.angle + Math.PI / 2); // Adjust for car facing up
+
+            // Draw drift smoke/sparks
+            if (car.isDrifting) {
+                ctx.fillStyle = 'rgba(200, 200, 200, 0.5)';
+                for (let i = 0; i < 3; i++) {
+                    const offsetX = (Math.random() - 0.5) * 20;
+                    const offsetY = car.height / 2 + Math.random() * 10;
+                    const size = 5 + Math.random() * 10;
+                    ctx.beginPath();
+                    ctx.arc(offsetX, offsetY, size, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                // Drift sparks
+                ctx.fillStyle = '#ffaa00';
+                for (let i = 0; i < 2; i++) {
+                    const offsetX = (Math.random() - 0.5) * 15;
+                    const offsetY = car.height / 2 + Math.random() * 5;
+                    ctx.beginPath();
+                    ctx.arc(offsetX, offsetY, 2, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            // Draw boost flames
+            if (car.isBoosting) {
+                const flameLength = 20 + Math.random() * 15;
+                const gradient = ctx.createLinearGradient(0, car.height / 2, 0, car.height / 2 + flameLength);
+                gradient.addColorStop(0, '#ff6600');
+                gradient.addColorStop(0.5, '#ffaa00');
+                gradient.addColorStop(1, 'rgba(255, 200, 0, 0)');
+
+                ctx.fillStyle = gradient;
+                ctx.beginPath();
+                ctx.moveTo(-8, car.height / 2);
+                ctx.lineTo(8, car.height / 2);
+                ctx.lineTo(0, car.height / 2 + flameLength);
+                ctx.closePath();
+                ctx.fill();
+            }
+
+            // Car body
+            ctx.fillStyle = car.isBoosting ? '#ff4444' : '#3498db';
+            ctx.fillRect(-car.width / 2, -car.height / 2, car.width, car.height);
+
+            // Car details
+            // Windshield
+            ctx.fillStyle = '#87CEEB';
+            ctx.fillRect(-car.width / 2 + 5, -car.height / 2 + 8, car.width - 10, 12);
+
+            // Front indicator
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(-car.width / 2 + 3, -car.height / 2 + 2, 6, 4);
+            ctx.fillRect(car.width / 2 - 9, -car.height / 2 + 2, 6, 4);
+
+            // Racing stripe
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(-3, -car.height / 2, 6, car.height);
+
+            // Wheels
+            ctx.fillStyle = '#222222';
+            ctx.fillRect(-car.width / 2 - 3, -car.height / 2 + 5, 6, 12);
+            ctx.fillRect(car.width / 2 - 3, -car.height / 2 + 5, 6, 12);
+            ctx.fillRect(-car.width / 2 - 3, car.height / 2 - 17, 6, 12);
+            ctx.fillRect(car.width / 2 - 3, car.height / 2 - 17, 6, 12);
+
+            ctx.restore();
+        }
+
+        function drawUI() {
+            // Update UI elements
+            lapCountEl.textContent = Math.min(race.lap, race.maxLaps);
+            speedEl.textContent = Math.round(Math.abs(car.speed) * 25); // Convert to "km/h"
+
+            // Boost bar
+            let boostPercent = 0;
+            if (car.isDrifting) {
+                boostPercent = (car.driftCharge / car.maxDriftCharge) * 100;
+                boostFillEl.className = 'charging';
+            } else if (car.isBoosting) {
+                boostPercent = (car.boostAmount / car.maxBoost) * 100;
+                boostFillEl.className = 'boosting';
+            } else {
+                boostPercent = (car.boostAmount / car.maxBoost) * 100;
+                boostFillEl.className = '';
+            }
+            boostFillEl.style.width = boostPercent + '%';
+
+            // Lap times
+            if (race.lap > 0) {
+                currentTimeEl.textContent = formatTime(race.currentLapTime);
+            }
+            if (race.bestLapTime < Infinity) {
+                bestLapEl.textContent = formatTime(race.bestLapTime);
+            }
+        }
+
+        function countdown() {
+            if (countdownTimer > 0) {
+                showMessage(countdownTimer.toString(), 900);
+                countdownTimer--;
+                setTimeout(countdown, 1000);
+            } else {
+                showMessage('GO!', 1000);
+                gameState = 'racing';
+                race.raceStartTime = Date.now();
+                race.lapStartTime = Date.now();
+            }
+        }
+
+        function gameLoop(currentTime) {
+            const dt = currentTime - lastTime;
+            lastTime = currentTime;
+
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Draw everything
+            drawTrack();
+            drawCar();
+
+            // Update game state
+            if (gameState === 'racing') {
+                updateCar(dt);
+            }
+
+            drawUI();
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Start the game
+        function init() {
+            // Position car at start
+            car.x = 420;
+            car.y = 550;
+            car.angle = -Math.PI / 2;
+
+            // Start countdown
+            setTimeout(countdown, 500);
+
+            // Start game loop
+            requestAnimationFrame(gameLoop);
+        }
+
+        init();
+    </script>
+</body>
+</html>
